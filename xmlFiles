@@ -1,0 +1,179 @@
+### main xml
+
+
+==============================
+
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:encryption="http://www.mulesoft.org/schema/mule/encryption" xmlns:scripting="http://www.mulesoft.org/schema/mule/scripting" xmlns:file="http://www.mulesoft.org/schema/mule/file" xmlns:vm="http://www.mulesoft.org/schema/mule/vm" xmlns:tracking="http://www.mulesoft.org/schema/mule/ee/tracking" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:spring="http://www.springframework.org/schema/beans" 
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+http://www.mulesoft.org/schema/mule/ee/tracking http://www.mulesoft.org/schema/mule/ee/tracking/current/mule-tracking-ee.xsd
+http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+http://www.mulesoft.org/schema/mule/scripting http://www.mulesoft.org/schema/mule/scripting/current/mule-scripting.xsd">
+	<file:connector name="sfg_master_card_input_file" outputPattern="#[message.inboundProperties.originalFilename].#[message.id]" autoDelete="true" streaming="true" validateConnections="true" fileAge="5000" doc:name="File"/>
+	<file:connector name="sfg_master_card_output_file" autoDelete="true" streaming="true" validateConnections="true" doc:name="File"/>
+	
+	<vm:connector name="sfg.common.status.queue" validateConnections="true" doc:name="VM"/>
+	<vm:connector name="sfg.common.transfer.queue" validateConnections="true" doc:name="VM"/>
+	<vm:connector name="sfg.mc.step2.queue" validateConnections="true" doc:name="VM"/>
+	
+	
+	<vm:connector name="sfg.mc.step3.queue" validateConnections="true" doc:name="VM"/>
+	<flow name="sfg_master_card_step1_flow">
+		<file:inbound-endpoint path="${sfg_master_card_step1_inbox_live}" moveToPattern="#[message.inboundProperties.originalFilename].#[message.id]" moveToDirectory="${sfg_master_card_inbox_backup}" connector-ref="sfg_master_card_input_file" responseTimeout="10000" doc:name="Master Input File">
+			<file:filename-regex-filter pattern="(.*)master_card(.*)" caseSensitive="true"/>
+		</file:inbound-endpoint>
+		<set-variable variableName="originalFilename" value="#[message.inboundProperties.originalFilename]" doc:name="Store Filename"/>
+		<set-variable variableName="id" value="#[message.id]" doc:name="Store ID"/>
+		<set-variable variableName="stagingName" value="#[message.inboundProperties.originalFilename].#[message.id]" doc:name="Store Staging name"/>
+		<file:outbound-endpoint path="${sfg_master_card_inbox_backup}" outputPattern="#[message.inboundProperties.originalFilename].#[message.id]" connector-ref="sfg_master_card_output_file" responseTimeout="10000" doc:name="Output for RS2"/>
+		<set-property propertyName="stagingName" value="#[message.inboundProperties.originalFilename].#[message.id]" doc:name="Store Staging name"/>
+		<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.mc.step2.queue" connector-ref="sfg.mc.step2.queue" doc:name="Send to Step 2 queue"/>
+		<set-property propertyName="status_step" value="sfg_mc_step1" doc:name="Status Step"/>
+		<set-property propertyName="status_value" value="1" doc:name="Status Value"/>
+		<set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+		<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update status"/>
+		<set-property propertyName="xfer_status" value="0" doc:name="Transfer Step"/>
+		<set-property propertyName="origName" value="#[message.inboundProperties.originalFilename]" doc:name="Status Value"/>
+		<set-property propertyName="xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+		<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.transfer.queue" connector-ref="sfg.common.transfer.queue" doc:name="Add transfer"/>
+	</flow>
+	<flow name="sfg_master_card_step2_flow">
+		<vm:inbound-endpoint exchange-pattern="one-way" path="sfg.mc.step2.queue" connector-ref="sfg.mc.step2.queue" doc:name="Listening at step2 queue"/>
+		<set-variable variableName="stagingPath" value="${sfg_master_card_inbox_backup}" doc:name="stagingPath Variable"/>
+		<set-variable variableName="stagingName" value="#[message.inboundProperties.stagingName]" doc:name="stagingName Variable"/>
+		<scripting:transformer doc:name="Get file inputstream">
+			<scripting:script engine="Groovy"><![CDATA[
+            String stagingPath = message.getInvocationProperty('stagingPath')
+            String folderPath = stagingPath + File.separator;
+            String fileName = message.getInvocationProperty('stagingName');
+            File file = new File(folderPath, fileName)
+
+            try {
+              payload = file.newInputStream()
+            } catch(Exception e) {
+              throw e;
+            }
+          ]]></scripting:script>
+		</scripting:transformer>
+		<file:outbound-endpoint path="${sfg_master_card_inbox_backup}" outputPattern="#[flowVars.originalFilename.replaceAll('.gpg', '')]" responseTimeout="10000" doc:name="Output for RS2"/>
+		<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.mc.step3.queue" connector-ref="sfg.mc.step3.queue" doc:name="Send to Step 3 queue"/>
+		<set-property propertyName="status_step" value="sfg_ep_step2" doc:name="Status Step"/>
+		<set-property propertyName="status_value" value="1" doc:name="Status Value"/>
+		<set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+		<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update status"/>
+		<exception-strategy ref="rs2_exception_handlerCatch_Exception_Strategy-for-sfg_master_card_step2_flow" doc:name="Exception Handler"/>
+	</flow>
+	<flow name="sfg_master_card_out_step3_flow">
+		<vm:inbound-endpoint exchange-pattern="one-way" path="sfg.mc.step3.queue" connector-ref="sfg.mc.step3.queue" doc:name="Send to iShare"/>
+		<set-variable variableName="cdScript" value="${MULE_HOME}/resources/cd_file.sh" doc:name="CDP Variable"/>
+		<set-variable variableName="stagingPath" value="${sfg_ms_step3_outbox_live}" doc:name="stagingPath Variable"/>
+		<set-variable variableName="stagingName" value="#[message.inboundProperties.stagingName]" doc:name="stagingName Variable"/>
+		<set-variable variableName="destName" value="#[message.inboundProperties.filename]" doc:name="destName Variable"/>
+		<set-variable variableName="sfg_master_card_step3_ndmscript" value="${sfg_master_card_step3_ndmscript}" doc:name="CDP Script"/>
+		<scripting:transformer doc:name="Execute NDM script">
+			<scripting:script engine="Groovy"><![CDATA[
+             def fileName = message.getInvocationProperty('stagingPath') + message.getInvocationProperty('stagingName')
+             def destName = message.getInvocationProperty('destName')
+             def runScript = message.getInvocationProperty('cdScript') + " " + message.getInvocationProperty('sfg_master_card_step3_ndmscript') + " &SFILE=" + fileName + " &DFILE=" + destName
+             def stdout = new StringBuilder()
+             def stderr = new StringBuilder()
+
+             def cmd = runScript.execute()
+             cmd.waitForProcessOutput(stdout, stderr)
+
+             flowVars.sfg_master_card_step3_ndmstdout = stdout.toString()
+             flowVars.sfg_master_card_step3_ndmstderr = stderr.toString()
+             flowVars.sfg_master_card_step3_ndmexitcode = cmd.exitValue()
+           ]]></scripting:script>
+		</scripting:transformer>
+		<choice doc:name="Choice">
+			<when expression="#[sfg_master_card_step3_ndmexitcode == 0]">
+				<set-property propertyName="status_step" value="sfg_mc_step3" doc:name="Status Step"/>
+				<set-property propertyName="status_value" value="1" doc:name="Status Value"/>
+				<set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+				<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update OK status"/>
+				<set-property propertyName="xfer_status" value="1" doc:name="Transfer Step"/>
+				<set-property propertyName="finalName" value="#[flowVars.destName]" doc:name="File name"/>
+				<set-property propertyName="dstServer" value="" doc:name="Destination server"/>
+				<set-property propertyName="xfer_id" value="#[message.id]" doc:name="XFER ID"/>
+				<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.transfer.queue" connector-ref="sfg.common.transfer.queue" doc:name="Add transfer"/>
+			</when>
+			<otherwise>
+				<set-property propertyName="status_step" value="sfg_mc_step3" doc:name="Status Step"/>
+				<set-property propertyName="status_value" value="0" doc:name="Status Value"/>
+				<set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+				<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update FAIL status"/>
+			</otherwise>
+		</choice>
+		<exception-strategy ref="rs2_exception_handlerCatch_Exception_Strategy-for-sfg_mc_step3_flow" doc:name="Exception Handler"/>
+	</flow>
+</mule>
+
+
+==============================================exception
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:vm="http://www.mulesoft.org/schema/mule/vm" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:spring="http://www.springframework.org/schema/beans" 
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd">
+	<choice-exception-strategy name="rs2_exception_handlerCatch_Exception_Strategy-for-sfg_master_card_step2_flow">
+		<catch-exception-strategy when="#[exception.causeMatches('java.io.IOException')]" doc:name="IO Catch Exception Strategy">
+			<exception-type-filter expectedType="java.io.IOException" doc:name="java.io.IOException"/>
+			<logger message="Error encrypting message #[exception.cause.message]" level="ERROR" doc:name="io Exception"/>
+			<set-property propertyName="status_step" value="sfg_mc_out_step2" doc:name="Status Step"/>
+			<set-property propertyName="status_value" value="0" doc:name="Status Value"/>
+			<set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+			<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update status"/>
+		</catch-exception-strategy>
+		<catch-exception-strategy when="#[exception.causeMatches('java.lang.Exception')]" doc:name="Default Catch Exception Strategy">
+			<exception-type-filter expectedType="java.lang.Exception" doc:name="java.lang.Exception"/>
+			<logger message="Error message #[exception.cause.message]" level="ERROR" doc:name="Default Exception"/>
+			<set-property propertyName="status_step" value="sfg_mc_out_step2" doc:name="Status Step"/>
+			<set-property propertyName="status_value" value="0" doc:name="Status Value"/>
+			<set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+			<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update status"/>
+		</catch-exception-strategy>
+	</choice-exception-strategy>
+	<choice-exception-strategy name="rs2_exception_handlerCatch_Exception_Strategy-for-sfg_mc_step3_flow">
+		<catch-exception-strategy when="#[exception.causeMatches('java.io.IOException')]" doc:name="IO Catch Exception Strategy">
+			<exception-type-filter expectedType="java.io.IOException" doc:name="java.io.IOException"/>
+			<logger message="Error encrypting message #[exception.cause.message]" level="ERROR" doc:name="io Exception"/>
+			<set-property propertyName="status_step" value="sfg_mc_out_step3" doc:name="Status Step"/>
+			<set-property propertyName="status_value" value="0" doc:name="Status Value"/>
+			<set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+			<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update status"/>
+		</catch-exception-strategy>
+		<catch-exception-strategy when="#[exception.causeMatches('java.lang.Exception')]" doc:name="Default Catch Exception Strategy">
+			<exception-type-filter expectedType="java.lang.Exception" doc:name="java.lang.Exception"/>
+			<logger message="Error message #[exception.cause.message]" level="ERROR" doc:name="Default Exception"/>
+			<set-property propertyName="status_step" value="sfg_mc_out_step3" doc:name="Status Step"/>
+			<set-property propertyName="status_value" value="0" doc:name="Status Value"/>
+			<set-property propertyName="status_xfer_id" value="#[message.id]" doc:name="Status XFER ID"/>
+			<vm:outbound-endpoint exchange-pattern="one-way" path="sfg.common.status.queue" connector-ref="sfg.common.status.queue" doc:name="Update status"/>
+		</catch-exception-strategy>
+	</choice-exception-strategy>
+</mule>
+
+
+===========================================================
+
+# Directory settings
+
+# Inbound from RS2 - Master_Card
+sfg_master_card_step1_inbox_live=/data/files/slztest2/inbox/
+sfg_master_card_inbox_backup=/data/backups/slztest2/inbox/
+
+sfg_master_card_step3_ndmscript=mc_step3.cdp
+sfg_master_card_step4_ndmscript=mc_step4.cdp
+
+
